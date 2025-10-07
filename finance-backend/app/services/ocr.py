@@ -36,8 +36,13 @@ class ReceiptExtractor:
             mime_type = magic.from_file(str(file_path), mime=True)
 
             # Use Gemini Vision if available for better accuracy
-            if self.use_gemini and mime_type.startswith('image/'):
-                extracted_data = await self._extract_with_gemini_vision(file_path, mime_type)
+            if self.use_gemini:
+                if mime_type.startswith('image/'):
+                    extracted_data = await self._extract_with_gemini_vision(file_path, mime_type)
+                elif mime_type == 'application/pdf':
+                    extracted_data = await self._extract_pdf_with_gemini(file_path)
+                else:
+                    raise ValueError(f"Unsupported file type: {mime_type}")
             else:
                 # Fallback to traditional OCR
                 if mime_type.startswith('image/'):
@@ -67,47 +72,68 @@ class ReceiptExtractor:
         This provides much better accuracy than traditional OCR
         """
         try:
+            print(f"[OCR] Starting Gemini vision extraction for {file_path}")
+            print(f"[OCR] MIME type: {mime_type}")
+            print(f"[OCR] Gemini API Key configured: {bool(settings.GEMINI_API_KEY)}")
+
             # Read the image file
             with open(file_path, 'rb') as f:
                 image_data = f.read()
 
-            # Upload the image to Gemini
-            model = genai.GenerativeModel('gemini-2.5-flash-latest')
+            print(f"[OCR] Image size: {len(image_data)} bytes")
 
-            # Create the prompt for receipt extraction
-            prompt = """You are a receipt OCR expert. Analyze this POS receipt image and extract the following information in JSON format:
+            # Upload the image to Gemini - using the latest Gemini 2.5 Flash model
+            model = genai.GenerativeModel('models/gemini-2.5-flash')
+            print(f"[OCR] Model initialized: models/gemini-2.5-flash")
 
-{
-  "merchant": "Name of the store/merchant",
-  "date": "Date in YYYY-MM-DD format",
-  "amount": "Total amount as a number (without currency symbol)",
-  "items": ["list of items purchased"],
-  "payment_method": "Payment method if visible (e.g., Cash, Card, UPI)",
-  "note": "Any additional relevant information"
-}
+            # Step 1: Extract all text from the image first
+            ocr_prompt = """Please read ALL the text visible in this receipt/bill image.
+Extract EVERY word, number, and line exactly as it appears.
+Preserve the structure and order.
+Return the complete text content."""
 
-Instructions:
-- Extract the TOTAL amount (not subtotal)
-- If date is not clear, use today's date
-- Be accurate with numbers
-- If merchant name is not clear, extract the most prominent business name
-- Return ONLY valid JSON, no other text
+            # Generate OCR text
+            print(f"[OCR] Sending OCR request to Gemini...")
+            ocr_response = model.generate_content([ocr_prompt, {"mime_type": mime_type, "data": image_data}])
+            raw_text = ocr_response.text.strip()
+            print(f"[OCR] Raw text extracted ({len(raw_text)} chars):")
+            print(f"[OCR] {raw_text[:500]}...")  # Print first 500 chars
 
-Receipt image:"""
+            # Step 2: Now analyze the extracted text to identify fields
+            print(f"[OCR] Analyzing extracted text...")
+            analysis_prompt = f"""You have extracted this text from a receipt/bill:
 
-            # Prepare the image for Gemini
-            image_parts = [
-                {
-                    "mime_type": mime_type,
-                    "data": base64.b64encode(image_data).decode('utf-8')
-                }
-            ]
+{raw_text}
 
-            # Generate content
-            response = model.generate_content([prompt, {"mime_type": mime_type, "data": image_data}])
+Now analyze this text and extract structured information. Return ONLY a valid JSON object (no markdown, no code blocks):
 
-            # Parse the response
+{{
+  "merchant": "Store/merchant name",
+  "date": "Transaction date in YYYY-MM-DD format",
+  "amount": "Final total amount as a number (convert any currency to INR if needed)",
+  "items": ["List of items purchased"],
+  "payment_method": "Payment method if mentioned",
+  "note": "Tax ID, invoice number, or other relevant details",
+  "raw_text": "The complete extracted text for reference"
+}}
+
+IMPORTANT RULES:
+1. Amount: Find the FINAL TOTAL amount (keywords: TOTAL, GRAND TOTAL, AMOUNT PAYABLE, NET AMOUNT, BALANCE, PAID).
+   - If amount is in USD ($), multiply by 83 to convert to INR
+   - If amount is in EUR (€), multiply by 90 to convert to INR
+   - If amount is in GBP (£), multiply by 104 to convert to INR
+   - Return only the number, no currency symbols
+2. Date: Convert to YYYY-MM-DD format. If not found, use today's date.
+3. Merchant: Business name (usually at the top)
+4. Items: Extract product/service names with prices if clearly listed
+5. Include the complete raw text in the "raw_text" field
+
+Return ONLY the JSON object, nothing else."""
+
+            # Generate structured analysis
+            response = model.generate_content(analysis_prompt)
             result_text = response.text.strip()
+            print(f"[OCR] Gemini response: {result_text}")
 
             # Clean up markdown code blocks if present
             if result_text.startswith("```json"):
@@ -117,7 +143,10 @@ Receipt image:"""
             if result_text.endswith("```"):
                 result_text = result_text[:-3]
 
-            extracted_data = json.loads(result_text.strip())
+            result_text = result_text.strip()
+            print(f"[OCR] Cleaned JSON: {result_text}")
+
+            extracted_data = json.loads(result_text)
 
             # Format the data to match expected structure
             formatted_data = {
@@ -125,22 +154,64 @@ Receipt image:"""
                 "date": extracted_data.get("date"),
                 "amount": float(extracted_data.get("amount")) if extracted_data.get("amount") else None,
                 "payment_method": extracted_data.get("payment_method"),
-                "note": extracted_data.get("note", ""),
+                "note": extracted_data.get("note", "") or extracted_data.get("raw_text", ""),
                 "items": extracted_data.get("items", []),
                 "confidence": 0.95,  # Gemini is very accurate
-                "extraction_method": "gemini_vision"
+                "extraction_method": "gemini_vision_2step"
             }
 
+            print(f"[OCR] Extraction successful: {formatted_data}")
             return formatted_data
 
         except json.JSONDecodeError as e:
             # Fallback to traditional OCR if JSON parsing fails
-            print(f"Gemini JSON parsing failed: {e}, falling back to OCR")
+            print(f"[OCR ERROR] Gemini JSON parsing failed: {e}")
+            print(f"[OCR ERROR] Raw response was: {result_text}")
+            print(f"[OCR] Falling back to traditional OCR")
             text = await self._extract_from_image(file_path)
             return self._parse_receipt_text(text)
         except Exception as e:
-            print(f"Gemini vision extraction failed: {e}, falling back to OCR")
+            print(f"[OCR ERROR] Gemini vision extraction failed: {e}")
+            import traceback
+            traceback.print_exc()
+            print(f"[OCR] Falling back to traditional OCR")
             text = await self._extract_from_image(file_path)
+            return self._parse_receipt_text(text)
+
+    async def _extract_pdf_with_gemini(self, file_path: Path) -> Dict[str, Any]:
+        """
+        Extract receipt data from PDF using Gemini by converting to images
+        """
+        try:
+            import fitz  # PyMuPDF
+            doc = fitz.open(file_path)
+
+            # Process first page only (receipts are usually single page)
+            page = doc.load_page(0)
+
+            # Convert PDF page to high-quality PNG image
+            mat = fitz.Matrix(2, 2)  # 2x zoom for better quality
+            pix = page.get_pixmap(matrix=mat)
+            img_data = pix.tobytes("png")
+            doc.close()
+
+            # Save temporary image
+            temp_image_path = file_path.with_suffix('.png')
+            with open(temp_image_path, 'wb') as f:
+                f.write(img_data)
+
+            # Use Gemini vision on the image
+            result = await self._extract_with_gemini_vision(temp_image_path, "image/png")
+
+            # Clean up temp image
+            if temp_image_path.exists():
+                os.unlink(temp_image_path)
+
+            return result
+
+        except Exception as e:
+            print(f"Gemini PDF extraction failed: {e}, falling back to traditional PDF extraction")
+            text = await self._extract_from_pdf(file_path)
             return self._parse_receipt_text(text)
 
     async def _extract_from_image(self, file_path: Path) -> str:

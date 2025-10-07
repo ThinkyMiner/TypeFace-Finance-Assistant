@@ -80,24 +80,40 @@ async def confirm_import(
         created_transactions = []
 
         for txn_data in transactions_data:
-            # Check for potential duplicates based on date + amount + description
-            existing = db.query(Transaction).filter(
-                Transaction.user_id == current_user_id,
-                Transaction.occurred_on == txn_data["occurred_on"],
-                Transaction.amount == txn_data["amount"],
-                Transaction.merchant == txn_data["merchant"]
-            ).first()
+            try:
+                # Ensure occurred_on is a date object
+                if isinstance(txn_data.get("occurred_on"), str):
+                    from datetime import datetime
+                    txn_data["occurred_on"] = datetime.fromisoformat(txn_data["occurred_on"]).date()
 
-            if existing:
-                continue  # Skip duplicates
+                # Check for potential duplicates based on date + amount + merchant
+                existing = db.query(Transaction).filter(
+                    Transaction.user_id == current_user_id,
+                    Transaction.occurred_on == txn_data["occurred_on"],
+                    Transaction.amount == txn_data["amount"],
+                    Transaction.merchant == txn_data.get("merchant")
+                ).first()
 
-            # Create transaction
-            transaction = Transaction(
-                user_id=current_user_id,
-                **txn_data
-            )
-            db.add(transaction)
-            created_transactions.append(transaction)
+                if existing:
+                    print(f"Skipping duplicate transaction: {txn_data}")
+                    continue  # Skip duplicates
+
+                # Create transaction with proper field mapping
+                transaction = Transaction(
+                    user_id=current_user_id,
+                    kind=txn_data.get("kind", "expense"),
+                    amount=float(txn_data.get("amount", 0)),
+                    occurred_on=txn_data["occurred_on"],
+                    merchant=txn_data.get("merchant"),
+                    note=txn_data.get("note"),
+                    payment_method=txn_data.get("payment_method"),
+                    category_id=txn_data.get("category_id")
+                )
+                db.add(transaction)
+                created_transactions.append(transaction)
+            except Exception as txn_error:
+                print(f"Error processing transaction {txn_data}: {txn_error}")
+                continue  # Skip problematic transactions
 
         db.commit()
 
@@ -112,6 +128,9 @@ async def confirm_import(
 
     except Exception as e:
         db.rollback()
+        print(f"Import error: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to import transactions: {str(e)}")
 
 

@@ -16,6 +16,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Total-Count"],  # Expose custom headers to frontend
 )
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
 app.include_router(health.router, prefix="/api/v1", tags=["meta"])
