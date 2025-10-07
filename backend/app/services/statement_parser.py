@@ -29,13 +29,29 @@ class StatementParser:
         file_path = Path(file_path)
 
         try:
-            # Try different parsing methods
             transactions = []
 
-            # Method 1: Try camelot (for tabular PDFs)
+            # Primary Method: Use Gemini AI for intelligent PDF parsing (handles any format)
+            if self.use_gemini:
+                try:
+                    transactions = await self._parse_with_gemini(file_path)
+                    if transactions:
+                        return {
+                            "transactions": transactions,
+                            "method": "gemini_ai",
+                            "success": True,
+                            "message": f"Successfully parsed {len(transactions)} transactions using AI"
+                        }
+                except Exception as e:
+                    print(f"Gemini AI parsing failed: {e}, trying fallback methods")
+
+            # Fallback Method 1: Try camelot (for tabular PDFs)
             try:
                 transactions = await self._parse_with_camelot(file_path)
                 if transactions:
+                    # Enhance with Gemini for better classification
+                    if self.use_gemini:
+                        transactions = await self._enhance_with_gemini(transactions)
                     return {
                         "transactions": transactions,
                         "method": "camelot",
@@ -45,10 +61,13 @@ class StatementParser:
             except Exception as e:
                 print(f"Camelot parsing failed: {e}")
 
-            # Method 2: Try pdfplumber text extraction
+            # Fallback Method 2: Try pdfplumber text extraction
             try:
                 transactions = await self._parse_with_pdfplumber(file_path)
                 if transactions:
+                    # Enhance with Gemini for better classification
+                    if self.use_gemini:
+                        transactions = await self._enhance_with_gemini(transactions)
                     return {
                         "transactions": transactions,
                         "method": "pdfplumber",
@@ -62,7 +81,7 @@ class StatementParser:
                 "transactions": [],
                 "method": "none",
                 "success": False,
-                "message": "Unable to extract transaction data from the statement"
+                "message": "Unable to extract transaction data from the statement. Please ensure the PDF contains a transaction table."
             }
 
         except Exception as e:
@@ -72,6 +91,141 @@ class StatementParser:
                 "success": False,
                 "message": f"Error processing statement: {str(e)}"
             }
+
+    async def _parse_with_gemini(self, file_path: Path) -> List[Dict[str, Any]]:
+        """
+        Use Gemini AI to intelligently parse ANY bank statement PDF format.
+        This method can handle both TypeFace exported PDFs and any bank statement format.
+        """
+        try:
+            print(f"[AI PARSER] Starting Gemini AI-powered PDF parsing for {file_path}")
+
+            # Extract all text from the PDF
+            full_text = ""
+            with pdfplumber.open(file_path) as pdf:
+                for page in pdf.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        full_text += page_text + "\n\n"
+
+            if not full_text.strip():
+                print("[AI PARSER] No text found in PDF")
+                return []
+
+            print(f"[AI PARSER] Extracted {len(full_text)} characters from PDF")
+
+            # Use Gemini to intelligently parse the transactions
+            model = genai.GenerativeModel('models/gemini-2.5-flash')
+
+            prompt = f"""You are a financial document parser. Analyze this bank statement/transaction history PDF text and extract ALL transactions.
+
+STATEMENT TEXT:
+{full_text}
+
+TASK: Extract every transaction from this document and return a JSON array of transactions.
+
+For EACH transaction, determine:
+1. **date**: Transaction date in YYYY-MM-DD format
+2. **merchant**: Merchant/description/narration (who the payment was to/from)
+3. **amount**: Transaction amount (always positive number, no currency symbols)
+4. **kind**: Either "income" or "expense"
+   - INCOME: Credits, deposits, salary, refunds, money received, interest, reversals, "CR"
+   - EXPENSE: Debits, withdrawals, purchases, payments made, transfers out, "DR"
+5. **payment_method**: If mentioned (e.g., "UPI", "card", "bank_transfer", "cash"). Default to "bank_transfer"
+6. **note**: Any additional details like reference number, invoice ID, tax details
+
+IMPORTANT RULES:
+- Extract EVERY transaction you can find in the document
+- For debit/credit columns: CREDIT = income, DEBIT = expense
+- Look for keywords: "credited"/"deposit" = income, "debited"/"withdrawal" = expense
+- Dates: Convert any date format to YYYY-MM-DD
+- Amounts: Extract only the number (no ₹, $, or other symbols)
+- Skip header rows, totals, and summary lines
+- If a transaction has both date and amount, include it
+
+Return ONLY a valid JSON array (no markdown, no code blocks):
+[
+  {{
+    "occurred_on": "2024-01-15",
+    "merchant": "Amazon India",
+    "amount": 1299.00,
+    "kind": "expense",
+    "payment_method": "bank_transfer",
+    "note": "Online purchase"
+  }},
+  ...
+]
+
+Extract ALL transactions you can find. Be thorough."""
+
+            print(f"[AI PARSER] Sending request to Gemini...")
+            response = model.generate_content(prompt)
+            result_text = response.text.strip()
+
+            print(f"[AI PARSER] Received response ({len(result_text)} chars)")
+
+            # Clean markdown code blocks
+            if result_text.startswith("```json"):
+                result_text = result_text[7:]
+            if result_text.startswith("```"):
+                result_text = result_text[3:]
+            if result_text.endswith("```"):
+                result_text = result_text[:-3]
+
+            result_text = result_text.strip()
+
+            # Parse JSON
+            transactions = json.loads(result_text)
+
+            if not isinstance(transactions, list):
+                print(f"[AI PARSER] Expected list, got {type(transactions)}")
+                return []
+
+            # Validate and clean transactions
+            valid_transactions = []
+            for txn in transactions:
+                try:
+                    # Ensure required fields exist
+                    if not txn.get("occurred_on") or not txn.get("amount"):
+                        continue
+
+                    # Validate and format
+                    valid_txn = {
+                        "occurred_on": txn["occurred_on"],
+                        "amount": float(txn["amount"]),
+                        "kind": txn.get("kind", "expense").lower(),
+                        "merchant": txn.get("merchant", "Unknown")[:100],
+                        "note": txn.get("note", "")[:500],
+                        "payment_method": txn.get("payment_method", "bank_transfer").lower().replace(" ", "_"),
+                        "category_id": None
+                    }
+
+                    # Validate kind
+                    if valid_txn["kind"] not in ["income", "expense"]:
+                        valid_txn["kind"] = "expense"
+
+                    # Validate amount
+                    if valid_txn["amount"] <= 0:
+                        continue
+
+                    valid_transactions.append(valid_txn)
+
+                except Exception as e:
+                    print(f"[AI PARSER] Skipping invalid transaction: {e}")
+                    continue
+
+            print(f"[AI PARSER] Successfully extracted {len(valid_transactions)} transactions using Gemini AI")
+            return valid_transactions
+
+        except json.JSONDecodeError as e:
+            print(f"[AI PARSER] JSON parsing failed: {e}")
+            print(f"[AI PARSER] Response was: {result_text[:500]}")
+            return []
+        except Exception as e:
+            print(f"[AI PARSER] Gemini parsing failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
 
     async def _enhance_with_gemini(self, transactions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Use Gemini AI to improve income/expense classification"""
