@@ -388,7 +388,7 @@ body {
 }
 
 .btn-export {
-  background-color: #28a745;
+  background-color: #FF6B35;
   color: white;
   padding: 12px 30px;
   border: none;
@@ -402,12 +402,12 @@ body {
 }
 
 .btn-export:hover:not(:disabled) {
-  background-color: #218838;
+  background-color: #FFA500;
   transform: translateY(-2px);
 }
 
 .btn-export:disabled {
-  background-color: #6c757d;
+  background-color: #ccc;
   cursor: not-allowed;
   opacity: 0.6;
 }
@@ -801,7 +801,8 @@ body {
   display: flex;
   gap: 15px;
   align-items: flex-end;
-  flex-wrap: wrap;
+  justify-content: space-between;
+  flex-wrap: nowrap;
   background-color: white;
   padding: 20px;
   border-radius: 8px;
@@ -1108,7 +1109,7 @@ body {
 
 /* Import Button */
 .btn-import {
-  background-color: #007bff;
+  background-color: #FF6B35;
   color: white;
   padding: 12px 30px;
   border: none;
@@ -1122,7 +1123,7 @@ body {
 }
 
 .btn-import:hover:not(:disabled) {
-  background-color: #0056b3;
+  background-color: #FFA500;
   transform: translateY(-2px);
 }
 
