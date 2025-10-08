@@ -145,7 +145,7 @@ npm install
 
    ```bash
    # Make sure you're in the backend directory with venv activated
-   python -c "from app.db import init_db; init_db()"
+   python -c "from app.db import Base, engine; Base.metadata.create_all(bind=engine)""
    ```
 
 ### Frontend Configuration
