@@ -177,7 +177,7 @@ source venv/bin/activate
 venv\Scripts\activate
 
 # Run the FastAPI server
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+python -m uvicorn app.main:app --reload
 ```
 
 The backend will start at: **http://localhost:8000**
